@@ -1,9 +1,11 @@
 from flask import Flask, request, render_template_string
 import os
+import subprocess
+import threading
 
 app = Flask(__name__)
 
-# قاعدة البيانات الكاملة
+# قاعدة البيانات المحلية
 DATABASE = {
     "4210047": "100768",
     "4210067": "109132",
@@ -58,6 +60,7 @@ DATABASE = {
     "4220185": "104017",
     "4220196": "109819",
     "4220198": "104772",
+    "1234567": "1234567",
     "4220200": "101573",
     "4220203": "104511",
     "4220211": "100955",
@@ -134,6 +137,35 @@ DATABASE = {
     "4240580": "100501"
 }
 
+# تخزين نتائج البحث المؤقتة
+search_results = {}
+
+def search_online(student_id):
+    """البحث الأونلاين باستخدام get_pass.py"""
+    try:
+        result = subprocess.run(
+            ['python', 'get_pass.py', '--id', student_id, '--online'],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        output = result.stdout + result.stderr
+        
+        # البحث عن كلمة المرور في المخرجات
+        for line in output.split('\n'):
+            if 'PASSWORD_FOUND:' in line:
+                password = line.split(':')[1].strip()
+                # حفظ في قاعدة البيانات
+                DATABASE[student_id] = password
+                # حفظ في الملف
+                with open('modren_id_pass.txt', 'a') as f:
+                    f.write(f"{student_id}:{password}\n")
+                return password
+        return None
+    except Exception as e:
+        print(f"Error in online search: {e}")
+        return None
+
 # قالب HTML
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -191,6 +223,10 @@ HTML_TEMPLATE = '''
             font-weight: bold;
         }
         button:hover { transform: scale(1.02); }
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
         .result {
             margin-top: 30px;
             padding: 20px;
@@ -198,9 +234,25 @@ HTML_TEMPLATE = '''
         }
         .success { background: #d4edda; border: 2px solid #28a745; }
         .error { background: #f8d7da; border: 2px solid #dc3545; }
+        .warning { background: #fff3cd; border: 2px solid #ffc107; }
         .password { font-size: 32px; font-weight: bold; font-family: monospace; color: #28a745; margin: 10px 0; }
         footer { margin-top: 30px; font-size: 12px; color: #999; }
         .stats { margin-top: 15px; font-size: 12px; color: #888; }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -208,27 +260,45 @@ HTML_TEMPLATE = '''
         <h1>🔍 البحث عن كلمة المرور</h1>
         <div class="subtitle">أكاديمية مصر الحديثة</div>
         
-        <form method="POST">
-            <input type="text" name="student_id" placeholder="مثال: 4220240" value="{{ student_id or '' }}" autocomplete="off">
-            <button type="submit">🔎 بحث</button>
+        <form method="POST" id="searchForm">
+            <input type="text" name="student_id" id="student_id" placeholder="مثال: 4220240" value="{{ student_id or '' }}" autocomplete="off">
+            <button type="submit" id="searchBtn">🔎 بحث</button>
         </form>
         
+        <div id="loadingMsg" style="display: none; margin-top: 20px; color: #667eea;">
+            <div class="loading"></div> جاري البحث الأونلاين... قد يستغرق هذا دقيقة
+        </div>
+        
         {% if result %}
-        <div class="result {{ 'success' if result.found else 'error' }}">
+        <div class="result {{ result.type }}">
             {% if result.found %}
                 <div>✅ تم العثور على النتيجة</div>
                 <div style="margin: 10px 0;">🆔 رقم الجلوس: <strong>{{ result.student_id }}</strong></div>
                 <div class="password">🔑 {{ result.password }}</div>
+                {% if result.source == 'online' %}
+                <div style="font-size: 12px; margin-top: 10px;">🌐 تم البحث أونلاين وحفظ النتيجة</div>
+                {% endif %}
+            {% elif result.searching %}
+                <div>🌐 جاري البحث الأونلاين عن الرقم {{ result.student_id }}...</div>
+                <div style="font-size: 12px; margin-top: 10px;">⏱️ قد يستغرق هذا حوالي دقيقة</div>
             {% else %}
                 <div>❌ رقم الجلوس {{ result.student_id }} غير موجود</div>
-                <div style="margin-top: 10px; font-size: 12px;">💡 الرجاء التأكد من الرقم</div>
+                <div style="margin-top: 10px; font-size: 12px;">💡 جارٍ البحث أونلاين تلقائياً...</div>
             {% endif %}
         </div>
         {% endif %}
         
         <div class="stats">📊 قاعدة البيانات تحتوي على {{ db_size }} سجل</div>
-        <footer>⚡ تحديث مستمر | بحث فوري</footer>
+        <footer>⚡ بحث فوري | بحث أونلاين تلقائي عند عدم الوجود</footer>
     </div>
+    
+    <script>
+        document.getElementById('searchForm').addEventListener('submit', function() {
+            document.getElementById('searchBtn').disabled = true;
+            document.getElementById('searchBtn').textContent = 'جاري البحث...';
+            document.getElementById('loadingMsg').style.display = 'block';
+        });
+    </script>
 </body>
 </html>
 '''
@@ -240,12 +310,45 @@ def home():
     
     if request.method == 'POST':
         student_id = request.form.get('student_id', '').strip()
+        
+        # البحث في قاعدة البيانات المحلية أولاً
         password = DATABASE.get(student_id)
         
         if password:
-            result = {'found': True, 'student_id': student_id, 'password': password}
+            result = {
+                'found': True, 
+                'student_id': student_id, 
+                'password': password, 
+                'source': 'local',
+                'type': 'success'
+            }
         else:
-            result = {'found': False, 'student_id': student_id}
+            # إذا لم يوجد، قم بالبحث الأونلاين
+            result = {
+                'found': False, 
+                'student_id': student_id, 
+                'searching': True,
+                'type': 'warning'
+            }
+            
+            # البحث الأونلاين (في نفس الطلب)
+            password = search_online(student_id)
+            
+            if password:
+                result = {
+                    'found': True, 
+                    'student_id': student_id, 
+                    'password': password, 
+                    'source': 'online',
+                    'type': 'success'
+                }
+            else:
+                result = {
+                    'found': False, 
+                    'student_id': student_id, 
+                    'searching': False,
+                    'type': 'error'
+                }
     
     return render_template_string(HTML_TEMPLATE, 
                                    student_id=student_id,
